@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from openai import AzureOpenAI
 from pydantic import BaseModel, Field
+from azure.ai.agents.telemetry import trace_function
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,7 @@ class HandoffService:
             f"lazy_classification={lazy_classification}"
         )
     
+    @trace_function()
     def classify_intent(
         self,
         user_message: str,

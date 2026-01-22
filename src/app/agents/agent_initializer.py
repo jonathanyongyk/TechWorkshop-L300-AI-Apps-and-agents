@@ -2,9 +2,11 @@ from typing import List, Any
 from azure.ai.projects import AIProjectClient
 from azure.ai.projects.models import PromptAgentDefinition
 from dotenv import load_dotenv
+from azure.ai.agents.telemetry import trace_function
 
 load_dotenv()
 
+@trace_function()
 def initialize_agent(project_client : AIProjectClient, model : str, name : str, description : str, instructions : str, tools : List[Any]):
     with project_client:
         agent = project_client.agents.create_version(

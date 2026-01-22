@@ -10,15 +10,16 @@ from concurrent.futures import ThreadPoolExecutor
 import orjson  # Faster JSON library
 from dotenv import load_dotenv
 from opentelemetry import trace
+from opentelemetry.sdk.resources import Resource
 import logging
-# from opentelemetry.instrumentation.openai_v2 import OpenAIInstrumentor
+from opentelemetry.instrumentation.openai_v2 import OpenAIInstrumentor
 
 # Azure & OpenAI Imports
 from azure.ai.projects import AIProjectClient
 from azure.identity import DefaultAzureCredential
 from openai import AzureOpenAI
-# from azure.monitor.opentelemetry import configure_azure_monitor
-# from azure.ai.agents.telemetry import trace_function
+from azure.monitor.opentelemetry import configure_azure_monitor
+from azure.ai.agents.telemetry import trace_function
 
 # FastAPI Imports
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -63,9 +64,22 @@ logger = logging.getLogger(__name__)
 # Global thread pool executor for CPU-bound operations
 thread_pool = ThreadPoolExecutor(max_workers=4)
 
-# application_insights_connection_string = os.environ["APPLICATIONINSIGHTS_CONNECTION_STRING"]
-# configure_azure_monitor(connection_string=application_insights_connection_string)
-# OpenAIInstrumentor().instrument()
+# Configure telemetry BEFORE creating any clients
+application_insights_connection_string = os.environ["APPLICATIONINSIGHTS_CONNECTION_STRING"]
+
+# Create resource attributes for better trace identification
+resource = Resource.create({
+    "service.name": "zava-shopping-assistant",
+    "service.version": "1.0.0",
+    "deployment.environment": os.getenv("ENVIRONMENT", "development")
+})
+
+configure_azure_monitor(
+    connection_string=application_insights_connection_string,
+    enable_live_metrics=True,  # Enable live metrics for real-time monitoring
+    resource=resource,
+)
+OpenAIInstrumentor().instrument()
 
 scenario = os.path.basename(__file__)
 tracer = trace.get_tracer(__name__)
@@ -119,6 +133,10 @@ app.mount("/mcp-inventory/", inventory_mcp_app)
 project_endpoint = os.environ.get("FOUNDRY_ENDPOINT")
 if not project_endpoint:
     raise ValueError("FOUNDRY_ENDPOINT environment variable is required")
+
+# Ensure Application Insights is set as environment variable for Azure AI SDK
+os.environ["APPLICATIONINSIGHTS_CONNECTION_STRING"] = application_insights_connection_string
+
 project_client = AIProjectClient(
     endpoint=project_endpoint,
     credential=DefaultAzureCredential(),
@@ -181,12 +199,17 @@ async def websocket_endpoint(websocket: WebSocket):
 
     async def run_customer_loyalty_task(customer_id):
         start_time = time.time()
-        with tracer.start_as_current_span("Run Customer Loyalty Thread"):
+        with tracer.start_as_current_span("Run Customer Loyalty Thread") as span:
+            span.set_attribute("customer_id", customer_id)
+            span.set_attribute("session_id", session_id)
+            loyalty_start = time.time()
+            
             nonlocal session_discount_percentage, session_loyalty_response
             message = f"Calculate discount for the customer with id {customer_id}"
             customer_loyalty_id = validated_env_vars.get('customer_loyalty')
             if not customer_loyalty_id:
                 session_loyalty_response = {"answer": "Customer loyalty agent not configured.", "agent": "customer_loyalty"}
+                span.set_attribute("error", "Agent not configured")
                 log_timing("Customer Loyalty Task", start_time, "Agent not configured")
                 return
                 
@@ -206,6 +229,19 @@ async def websocket_endpoint(websocket: WebSocket):
             if parsed_response.get("discount_percentage"):
                 session_discount_percentage = parsed_response["discount_percentage"]
             session_loyalty_response = parsed_response  # Store the full response for later
+            
+            # Add span attributes
+            loyalty_duration = time.time() - loyalty_start
+            span.set_attribute("duration_seconds", loyalty_duration)
+            span.set_attribute("discount_percentage", session_discount_percentage or "none")
+            span.set_attribute("response_length", len(bot_reply))
+            
+            # Get trace ID
+            span_context = span.get_span_context()
+            if span_context:
+                trace_id = format(span_context.trace_id, '032x')
+                span.set_attribute("trace_id", trace_id)
+            
             # Do NOT send the response here!
             log_timing("Customer Loyalty Task", start_time, f"Discount: {session_discount_percentage}")
 
@@ -267,13 +303,31 @@ async def websocket_endpoint(websocket: WebSocket):
                 handoff_start_time = time.time()
                 formatted_history = format_chat_history(redact_bad_prompts_in_history(chat_history, bad_prompts))
                 logger.info("Handoff agent execution initiated - commencing agent selection protocol")
-                with tracer.start_as_current_span("Handoff Intent Classification"):
+                with tracer.start_as_current_span("Handoff Intent Classification") as span:
+                    span.set_attribute("session_id", session_id)
+                    span.set_attribute("user_message", user_message[:100])  # Truncate for privacy
+                    classification_start = time.time()
+                    
                     # Intent classification using structured outputs for reliable routing
                     intent_result = handoff_service.classify_intent(
                         user_message=user_message,
                         session_id=session_id,
                         chat_history=formatted_history
                     )
+                    
+                    # Add classification results to span
+                    classification_duration = time.time() - classification_start
+                    span.set_attribute("duration_seconds", classification_duration)
+                    span.set_attribute("classified_agent", intent_result["agent_id"])
+                    span.set_attribute("domain", intent_result["domain"])
+                    span.set_attribute("confidence", intent_result["confidence"])
+                    span.set_attribute("reasoning", intent_result["reasoning"])
+                    
+                    # Get trace ID
+                    span_context = span.get_span_context()
+                    if span_context:
+                        trace_id = format(span_context.trace_id, '032x')
+                        span.set_attribute("trace_id", trace_id)
 
                 # Extract agent information from classification result
                 agent_name = intent_result["agent_id"]  # e.g., "cora", "cart_manager"
@@ -404,7 +458,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Execute agent based on type - unified agent processor pattern
                 bot_reply = ""
                 
-                with tracer.start_as_current_span(f"{agent_name.title()} Agent Call"):
+                with tracer.start_as_current_span(f"{agent_name.title()} Agent Call") as span:
+                    # Add trace attributes
+                    span.set_attribute("agent_name", agent_name)
+                    span.set_attribute("agent_id", agent_selected)
+                    span.set_attribute("session_id", session_id)
+                    span_start_time = time.time()
+                    
                     # =================================================================
                     # SPECIAL CASE: Image Creation (uses gpt-image-1, not agent processor)
                     # =================================================================
@@ -494,6 +554,17 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Stream response from agent (yields chunks as they're generated)
                     async for msg in processor.run_conversation_with_text_stream(input_message=agent_context):
                         bot_reply = extract_bot_reply(msg)  # Extract text from streaming message
+                    
+                    # Add span attributes after execution
+                    span_duration = time.time() - span_start_time
+                    span.set_attribute("duration_seconds", span_duration)
+                    span.set_attribute("response_length", len(bot_reply))
+                    
+                    # Get trace ID from span context
+                    span_context = span.get_span_context()
+                    if span_context:
+                        trace_id = format(span_context.trace_id, '032x')
+                        span.set_attribute("trace_id", trace_id)
                 
                 logger.info(f"{agent_name} agent execution completed")
                 

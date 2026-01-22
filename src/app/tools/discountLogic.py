@@ -5,13 +5,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from opentelemetry import trace
-from azure.monitor.opentelemetry import configure_azure_monitor
+# Note: Azure Monitor should only be configured once in chat_app.py to avoid conflicts
+# from azure.monitor.opentelemetry import configure_azure_monitor
 from azure.ai.agents.telemetry import trace_function
 import time
 # from opentelemetry.instrumentation.openai_v2 import OpenAIInstrumentor
 
-# Enable Azure Monitor tracing
-application_insights_connection_string = os.environ["APPLICATIONINSIGHTS_CONNECTION_STRING"]
+# Enable Azure Monitor tracing - COMMENTED OUT: Should only be done in chat_app.py
+# application_insights_connection_string = os.environ["APPLICATIONINSIGHTS_CONNECTION_STRING"]
 # configure_azure_monitor(connection_string=application_insights_connection_string)
 # OpenAIInstrumentor().instrument()
 

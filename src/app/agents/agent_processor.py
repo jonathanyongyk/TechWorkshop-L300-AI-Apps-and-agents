@@ -13,15 +13,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from app.servers.mcp_inventory_client import MCPShopperToolsClient
 
 from opentelemetry import trace
-from azure.monitor.opentelemetry import configure_azure_monitor
+# Note: Azure Monitor should only be configured once in chat_app.py to avoid conflicts
+# from azure.monitor.opentelemetry import configure_azure_monitor
 from azure.ai.agents.telemetry import trace_function
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import time
 # from opentelemetry.instrumentation.openai_v2 import OpenAIInstrumentor
 
-# # Enable Azure Monitor tracing
-application_insights_connection_string = os.environ["APPLICATIONINSIGHTS_CONNECTION_STRING"]
+# # Enable Azure Monitor tracing - COMMENTED OUT: Should only be done in chat_app.py
+# application_insights_connection_string = os.environ["APPLICATIONINSIGHTS_CONNECTION_STRING"]
 # configure_azure_monitor(connection_string=application_insights_connection_string)
 # OpenAIInstrumentor().instrument()
 
@@ -164,6 +165,7 @@ class AgentProcessor:
         _toolset_cache[agent_type] = functions
         return functions
     
+    @trace_function()
     def run_conversation_with_text(self, input_message: str = ""):
         print("Running async!")
         start_time = time.time()
@@ -192,6 +194,7 @@ class AgentProcessor:
             yield message.response.output_text
         print(f"[TIMELOG] Total run_conversation_with_text time: {time.time() - start_time:.2f}s")
 
+    @trace_function()
     def _run_conversation_sync(self, input_message: str = ""):
         """Optimized synchronous conversation runner with better error handling."""
         thread_id = self.thread_id
